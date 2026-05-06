@@ -1,8 +1,7 @@
 import os
 import logging
 import anthropic
-import json
-from composio_anthropic import ComposioToolSet, Action
+import requests
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
@@ -15,22 +14,18 @@ logger = logging.getLogger(__name__)
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-SYSTEM_PROMPT = "You are Ali's personal assistant. You can read his Zoho emails. Be concise and helpful. Respond in English."
+SYSTEM_PROMPT = "You are Ali's personal assistant. Be concise and helpful. Respond in English."
 
 conversation_histories = {}
 
 def get_claude_response(messages):
-    toolset = ComposioToolSet(api_key=COMPOSIO_API_KEY)
-    tools = toolset.get_tools(actions=[Action.ZOHOMAIL_LIST_MESSAGES])
     response = claude_client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
-        messages=messages,
-        tools=tools
+        messages=messages
     )
-    result = toolset.handle_tool_calls(response, messages)
-    return result.content[0].text
+    return response.content[0].text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello Ali! I'm your Claude Assistant. How can I help?")
