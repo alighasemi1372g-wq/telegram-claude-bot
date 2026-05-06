@@ -1,6 +1,8 @@
 import os
 import logging
 import anthropic
+import json
+from composio import Composio, Action
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
@@ -11,27 +13,39 @@ COMPOSIO_API_KEY = os.environ["COMPOSIO_API_KEY"]
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = "You are Ali's personal assistant. You can read his Zoho emails via Composio. Be concise and helpful. Respond in English."
+composio_client = Composio(api_key=COMPOSIO_API_KEY)
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+SYSTEM_PROMPT = "You are Ali's personal assistant. You can read his Zoho emails. Be concise and helpful. Respond in English."
 
 conversation_histories = {}
 
 def get_claude_response(messages):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    response = client.beta.messages.create(
+    tools = composio_client.get_tools(actions=[Action.ZOHOMAIL_LIST_MESSAGES])
+    response = claude_client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
         messages=messages,
-        mcp_servers=[
-            {
-                "type": "url",
-                "url": "https://connect.composio.dev/mcp",
-                "name": "composio",
-                "headers": {"x-consumer-api-key": COMPOSIO_API_KEY}
-            }
-        ],
-        betas=["mcp-client-2025-04-04"]
+        tools=tools
     )
+    if response.stop_reason == "tool_use":
+        tool_use = next(b for b in response.content if b.type == "tool_use")
+        tool_result = composio_client.execute_action(
+            action=Action.ZOHOMAIL_LIST_MESSAGES,
+            params=tool_use.input
+        )
+        messages = messages + [
+            {"role": "assistant", "content": response.content},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": json.dumps(tool_result)}]}
+        ]
+        response = claude_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            system=SYSTEM_PROMPT,
+            messages=messages,
+            tools=tools
+        )
     return response.content[0].text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
