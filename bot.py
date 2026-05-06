@@ -25,8 +25,9 @@ def get_claude_response(messages):
         mcp_servers=[
             {
                 "type": "url",
-                "url": f"https://connect.composio.dev/mcp?x-api-key={COMPOSIO_API_KEY}",
-                "name": "composio"
+                "url": "https://connect.composio.dev/mcp",
+                "name": "composio",
+                "headers": {"x-consumer-api-key": COMPOSIO_API_KEY}
             }
         ],
         betas=["mcp-client-2025-04-04"]
