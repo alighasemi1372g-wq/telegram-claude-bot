@@ -1,7 +1,6 @@
 import os
 import logging
 import anthropic
-import requests
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
@@ -14,28 +13,18 @@ logger = logging.getLogger(__name__)
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-SYSTEM_PROMPT = "You are Ali's personal assistant. You have access to his Zoho emails via tools. Be concise and helpful. Respond in English."
+SYSTEM_PROMPT = "You are Ali's personal assistant. Be concise and helpful. Respond in English."
 
 conversation_histories = {}
 
 def get_claude_response(messages):
-    response = claude_client.beta.messages.create(
+    response = claude_client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
-        messages=messages,
-        mcp_servers=[
-            {
-                "type": "url",
-                "url": "https://connect.composio.dev/mcp",
-                "name": "composio",
-                "authorization_token": COMPOSIO_API_KEY
-            }
-        ],
-        betas=["mcp-client-2025-04-04"]
+        messages=messages
     )
-    text_blocks = [b for b in response.content if hasattr(b, 'text')]
-    return text_blocks[-1].text if text_blocks else "Done."
+    return response.content[0].text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello Ali! I'm your Claude Assistant. How can I help?")
