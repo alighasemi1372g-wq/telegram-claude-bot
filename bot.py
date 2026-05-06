@@ -17,7 +17,7 @@ conversation_histories = {}
 
 def get_claude_response(messages):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    response = client.messages.create(
+    response = client.beta.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
@@ -29,7 +29,8 @@ def get_claude_response(messages):
                 "name": "composio",
                 "authorization_token": COMPOSIO_API_KEY
             }
-        ]
+        ],
+        betas=["mcp-client-2025-04-04"]
     )
     return response.content[0].text
 
