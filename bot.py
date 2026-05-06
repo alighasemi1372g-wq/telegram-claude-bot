@@ -18,11 +18,19 @@ conversation_histories = {}
 def get_claude_response(messages):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1000,
-        system=SYSTEM_PROMPT,
-        messages=messages
-    )
+    model="claude-sonnet-4-6",
+    max_tokens=1000,
+    system=SYSTEM_PROMPT,
+    messages=messages,
+    mcp_servers=[
+        {
+            "type": "url",
+            "url": "https://connect.composio.dev/mcp",
+            "name": "composio",
+            "authorization_token": COMPOSIO_API_KEY
+        }
+    ]
+)
     return response.content[0].text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
