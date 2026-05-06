@@ -18,7 +18,7 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 SYSTEM_PROMPT = """You are Ali's personal assistant. You have access to his ClickUp tasks.
 When asked about tasks, use the get_clickup_tasks tool.
 When asked to create a task, use the create_clickup_task tool.
-Be concise and helpful. Respond in English."""
+Format task lists as clean bullet points. Be concise and helpful. Respond in English."""
 
 CLICKUP_HEADERS = {"Authorization": CLICKUP_API_KEY}
 
@@ -28,10 +28,17 @@ def get_clickup_tasks():
         teams = requests.get("https://api.clickup.com/api/v2/team", headers=CLICKUP_HEADERS).json()
         team_id = teams["teams"][0]["id"]
         tasks = requests.get(
-            f"https://api.clickup.com/api/v2/team/{team_id}/task?include_closed=false",
+            f"https://api.clickup.com/api/v2/team/{team_id}/task?include_closed=false&page=0",
             headers=CLICKUP_HEADERS
         ).json()
-        return tasks.get("tasks", [])
+        all_tasks = tasks.get("tasks", [])[:10]
+        summary = []
+        for t in all_tasks:
+            name = t.get("name", "?")
+            status = t.get("status", {}).get("status", "?")
+            priority = t.get("priority", {}).get("priority", "-") if t.get("priority") else "-"
+            summary.append(f"• {name} | {status} | {priority}")
+        return "\n".join(summary)
     except Exception as e:
         return f"Error fetching tasks: {e}"
 
@@ -84,7 +91,7 @@ def get_claude_response(messages):
     if response.stop_reason == "tool_use":
         tool_use = next(b for b in response.content if b.type == "tool_use")
         if tool_use.name == "get_clickup_tasks":
-            tool_result = str(get_clickup_tasks())
+            tool_result = get_clickup_tasks()
         elif tool_use.name == "create_clickup_task":
             tool_result = str(create_clickup_task(**tool_use.input))
         else:
