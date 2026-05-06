@@ -11,26 +11,26 @@ COMPOSIO_API_KEY = os.environ["COMPOSIO_API_KEY"]
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = "You are Ali's personal assistant. Be concise and helpful. Respond in English."
+SYSTEM_PROMPT = "You are Ali's personal assistant. You can read his Zoho emails via Composio. Be concise and helpful. Respond in English."
 
 conversation_histories = {}
 
 def get_claude_response(messages):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
-    model="claude-sonnet-4-6",
-    max_tokens=1000,
-    system=SYSTEM_PROMPT,
-    messages=messages,
-    mcp_servers=[
-        {
-            "type": "url",
-            "url": "https://connect.composio.dev/mcp",
-            "name": "composio",
-            "authorization_token": COMPOSIO_API_KEY
-        }
-    ]
-)
+        model="claude-sonnet-4-6",
+        max_tokens=1000,
+        system=SYSTEM_PROMPT,
+        messages=messages,
+        mcp_servers=[
+            {
+                "type": "url",
+                "url": "https://connect.composio.dev/mcp",
+                "name": "composio",
+                "authorization_token": COMPOSIO_API_KEY
+            }
+        ]
+    )
     return response.content[0].text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
