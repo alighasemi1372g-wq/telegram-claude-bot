@@ -109,7 +109,7 @@ def get_zoho_emails():
         ).json()
         messages = emails_resp.get("data", [])
         if not messages:
-            return f"No emails found."
+            return "No emails found."
         lines = []
         for m in messages:
             sender = m.get("fromAddress", "?")
@@ -132,24 +132,30 @@ def send_zoho_email(to, subject, body):
         ).json()
         accounts_data = accounts_resp.get("data", [])
         if not accounts_data:
-            return f"No accounts found."
-        account_id = accounts_data[0].get("accountId")
-        from_address = accounts_data[0].get("emailAddress")
+            return "No accounts found."
+        account = accounts_data[0]
+        account_id = account.get("accountId")
+        from_address = account.get("primaryEmailAddress") or account.get("emailAddress") or account.get("mailId")
+        logger.info(f"Sending from {from_address} to {to}, account keys: {list(account.keys())}")
+        payload = {
+            "fromAddress": from_address,
+            "toAddress": to,
+            "subject": subject,
+            "content": body,
+            "mailFormat": "plaintext"
+        }
+        logger.info(f"Send payload: {payload}")
         resp = requests.post(
             f"https://mail.zoho.com/api/accounts/{account_id}/messages",
             headers={"Authorization": f"Zoho-oauthtoken {token}"},
-            json={
-                "fromAddress": from_address,
-                "toAddress": to,
-                "subject": subject,
-                "content": body,
-                "mailFormat": "plaintext"
-            }
+            json=payload
         ).json()
+        logger.info(f"Send response: {resp}")
         if resp.get("status", {}).get("code") == 200:
             return f"Email sent to {to}!"
         return f"Error sending: {resp}"
     except Exception as e:
+        logger.error(f"Send error: {e}")
         return f"Error: {e}"
 
 
