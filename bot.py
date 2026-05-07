@@ -20,21 +20,25 @@ logger = logging.getLogger(__name__)
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-SYSTEM_PROMPT = """You are Ali's personal assistant. You have access to his ClickUp tasks and Zoho emails.
-When asked about tasks, use get_clickup_tasks.
-When asked about emails, use get_zoho_emails.
-When asked to send or reply to an email, use send_zoho_email.
-When asked to create a task, use create_clickup_task.
-Be concise. Respond in English. Never use markdown tables."""
+HAIKU = "claude-haiku-4-5"
+SONNET = "claude-sonnet-4-6"
+
+SYSTEM_PROMPT = """You are Ali's personal assistant. You have tools for ClickUp tasks and Zoho emails.
+Use get_clickup_tasks for tasks, get_zoho_emails for emails, send_zoho_email to send, create_clickup_task to create tasks.
+Be very concise. Plain text only. No markdown tables. No bullet formatting beyond simple dashes."""
 
 CLICKUP_HEADERS = {"Authorization": CLICKUP_API_KEY}
-zoho_access_token = None
 zoho_refresh_token = ZOHO_REFRESH_TOKEN
+
+
+def pick_model(text):
+    heavy = ["draft", "write", "analyze", "analyse", "summarize", "summarise", "compose", "explain", "detail"]
+    return SONNET if any(w in text.lower() for w in heavy) else HAIKU
 
 
 class TokenHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        global zoho_refresh_token, zoho_access_token
+        global zoho_refresh_token
         if self.path.startswith("/zoho-auth"):
             from urllib.parse import urlparse, parse_qs
             params = parse_qs(urlparse(self.path).query)
@@ -48,15 +52,13 @@ class TokenHandler(BaseHTTPRequestHandler):
                     "grant_type": "authorization_code"
                 }).json()
                 rt = resp.get("refresh_token", "")
-                at = resp.get("access_token", "")
                 if rt:
                     zoho_refresh_token = rt
-                    zoho_access_token = at
-                    msg = f"SUCCESS! Save this refresh token in Railway variables as ZOHO_REFRESH_TOKEN:\n\n{rt}"
+                    msg = f"SUCCESS! ZOHO_REFRESH_TOKEN:\n\n{rt}"
                 else:
                     msg = f"Error: {resp}"
             else:
-                msg = "No code found in URL."
+                msg = "No code found."
             self.send_response(200)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
@@ -72,12 +74,10 @@ class TokenHandler(BaseHTTPRequestHandler):
 
 def start_web_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), TokenHandler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), TokenHandler).serve_forever()
 
 
-def get_zoho_access_token():
-    global zoho_access_token
+def get_zoho_token():
     if not zoho_refresh_token:
         return None
     resp = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
@@ -86,108 +86,86 @@ def get_zoho_access_token():
         "client_secret": ZOHO_CLIENT_SECRET,
         "grant_type": "refresh_token"
     }).json()
-    zoho_access_token = resp.get("access_token")
-    return zoho_access_token
+    return resp.get("access_token")
 
 
 def get_zoho_emails():
     try:
-        token = get_zoho_access_token()
+        token = get_zoho_token()
         if not token:
             return "Zoho not connected."
-        accounts_resp = requests.get(
+        accounts = requests.get(
             "https://mail.zoho.com/api/accounts",
             headers={"Authorization": f"Zoho-oauthtoken {token}"}
-        ).json()
-        accounts_data = accounts_resp.get("data", [])
-        if not accounts_data:
-            return f"No accounts found: {accounts_resp}"
-        account_id = accounts_data[0].get("accountId")
-        emails_resp = requests.get(
-            f"https://mail.zoho.com/api/accounts/{account_id}/messages/view?limit=5&sortorder=false",
+        ).json().get("data", [])
+        if not accounts:
+            return "No Zoho account found."
+        aid = accounts[0].get("accountId")
+        msgs = requests.get(
+            f"https://mail.zoho.com/api/accounts/{aid}/messages/view?limit=5&sortorder=false",
             headers={"Authorization": f"Zoho-oauthtoken {token}"}
-        ).json()
-        messages = emails_resp.get("data", [])
-        if not messages:
-            return "No emails found."
-        lines = []
-        for m in messages:
-            sender = m.get("fromAddress", "?")
-            subject = m.get("subject", "(no subject)")
-            lines.append(f"• From: {sender}\n  Subject: {subject}")
-        return "\n".join(lines)
+        ).json().get("data", [])
+        if not msgs:
+            return "Inbox is empty."
+        return "\n".join([
+            f"{i+1}. From: {m.get('fromAddress','?')} | {m.get('subject','(no subject)')}"
+            for i, m in enumerate(msgs)
+        ])
     except Exception as e:
-        logger.error(f"Zoho error: {e}")
         return f"Error: {e}"
 
 
 def send_zoho_email(to, subject, body):
     try:
-        token = get_zoho_access_token()
+        token = get_zoho_token()
         if not token:
             return "Zoho not connected."
-        accounts_resp = requests.get(
+        accounts = requests.get(
             "https://mail.zoho.com/api/accounts",
             headers={"Authorization": f"Zoho-oauthtoken {token}"}
-        ).json()
-        accounts_data = accounts_resp.get("data", [])
-        if not accounts_data:
-            return "No accounts found."
-        account = accounts_data[0]
-        account_id = account.get("accountId")
-        from_address = account.get("primaryEmailAddress") or account.get("emailAddress") or account.get("mailId")
-        logger.info(f"Sending from {from_address} to {to}, account keys: {list(account.keys())}")
-        payload = {
-            "fromAddress": from_address,
-            "toAddress": to,
-            "subject": subject,
-            "content": body,
-            "mailFormat": "plaintext"
-        }
-        logger.info(f"Send payload: {payload}")
+        ).json().get("data", [])
+        if not accounts:
+            return "No account found."
+        aid = accounts[0].get("accountId")
+        from_addr = accounts[0].get("primaryEmailAddress") or accounts[0].get("emailAddress")
         resp = requests.post(
-            f"https://mail.zoho.com/api/accounts/{account_id}/messages",
+            f"https://mail.zoho.com/api/accounts/{aid}/messages",
             headers={"Authorization": f"Zoho-oauthtoken {token}"},
-            json=payload
+            json={"fromAddress": from_addr, "toAddress": to, "subject": subject, "content": body, "mailFormat": "plaintext"}
         ).json()
-        logger.info(f"Send response: {resp}")
         if resp.get("status", {}).get("code") == 200:
-            return f"Email sent to {to}!"
-        return f"Error sending: {resp}"
+            return f"Email sent to {to}."
+        return f"Send error: {resp}"
     except Exception as e:
-        logger.error(f"Send error: {e}")
         return f"Error: {e}"
 
 
 def get_clickup_tasks(search=""):
     try:
         teams = requests.get("https://api.clickup.com/api/v2/team", headers=CLICKUP_HEADERS).json()
-        team_id = teams["teams"][0]["id"]
-        url = f"https://api.clickup.com/api/v2/team/{team_id}/task?include_closed=false&page=0"
+        tid = teams["teams"][0]["id"]
+        url = f"https://api.clickup.com/api/v2/team/{tid}/task?include_closed=false&page=0"
         if search:
             url += f"&search={search}"
         tasks = requests.get(url, headers=CLICKUP_HEADERS).json().get("tasks", [])[:5]
         if not tasks:
             return "No tasks found."
-        lines = []
-        for t in tasks:
-            name = t.get("name", "?")
-            status = t.get("status", {}).get("status", "?")
-            priority = t.get("priority", {}).get("priority", "-") if t.get("priority") else "-"
-            lines.append(f"• {name} [{status}] [{priority}]")
-        return "\n".join(lines)
+        return "\n".join([
+            f"- {t.get('name','?')} [{t.get('status',{}).get('status','?')}] [{t.get('priority',{}).get('priority','-') if t.get('priority') else '-'}]"
+            for t in tasks
+        ])
     except Exception as e:
         return f"Error: {e}"
 
 
 def create_clickup_task(name, list_id, description=""):
     try:
-        data = {"name": name, "description": description}
-        result = requests.post(
+        r = requests.post(
             f"https://api.clickup.com/api/v2/list/{list_id}/task",
-            headers=CLICKUP_HEADERS, json=data
+            headers=CLICKUP_HEADERS,
+            json={"name": name, "description": description}
         ).json()
-        return f"Task created: {result.get('name', 'done')}"
+        return f"Created: {r.get('name', 'done')}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -195,29 +173,29 @@ def create_clickup_task(name, list_id, description=""):
 tools = [
     {
         "name": "get_zoho_emails",
-        "description": "Get Ali's latest Zoho emails",
+        "description": "Get Ali's latest 5 Zoho emails",
         "input_schema": {"type": "object", "properties": {}}
     },
     {
         "name": "send_zoho_email",
-        "description": "Send or reply to an email via Zoho",
+        "description": "Send an email via Zoho",
         "input_schema": {
             "type": "object",
             "properties": {
-                "to": {"type": "string", "description": "Recipient email address"},
-                "subject": {"type": "string", "description": "Email subject"},
-                "body": {"type": "string", "description": "Email body text"}
+                "to": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"}
             },
             "required": ["to", "subject", "body"]
         }
     },
     {
         "name": "get_clickup_tasks",
-        "description": "Get Ali's ClickUp tasks, optionally filtered by keyword",
+        "description": "Get Ali's ClickUp tasks, filtered by optional keyword",
         "input_schema": {
             "type": "object",
             "properties": {
-                "search": {"type": "string", "description": "Keyword to filter tasks"}
+                "search": {"type": "string"}
             }
         }
     },
@@ -239,10 +217,10 @@ tools = [
 conversation_histories = {}
 
 
-def get_claude_response(messages):
+def get_claude_response(messages, model):
     response = claude_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=500,
+        model=model,
+        max_tokens=400,
         system=SYSTEM_PROMPT,
         messages=messages,
         tools=tools
@@ -250,22 +228,22 @@ def get_claude_response(messages):
     if response.stop_reason == "tool_use":
         tool_use = next(b for b in response.content if b.type == "tool_use")
         if tool_use.name == "get_zoho_emails":
-            tool_result = get_zoho_emails()
+            result = get_zoho_emails()
         elif tool_use.name == "send_zoho_email":
-            tool_result = send_zoho_email(**tool_use.input)
+            result = send_zoho_email(**tool_use.input)
         elif tool_use.name == "get_clickup_tasks":
-            tool_result = get_clickup_tasks(**tool_use.input)
+            result = get_clickup_tasks(**tool_use.input)
         elif tool_use.name == "create_clickup_task":
-            tool_result = create_clickup_task(**tool_use.input)
+            result = create_clickup_task(**tool_use.input)
         else:
-            tool_result = "Unknown tool"
+            result = "Unknown tool"
         messages = messages + [
             {"role": "assistant", "content": response.content},
-            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": tool_result}]}
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": result}]}
         ]
         response = claude_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=500,
+            model=model,
+            max_tokens=400,
             system=SYSTEM_PROMPT,
             messages=messages,
             tools=tools
@@ -274,20 +252,28 @@ def get_claude_response(messages):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hello Ali! I can help with ClickUp tasks and Zoho emails!")
+    await update.message.reply_text("👋 Hi Ali! Ask me about your emails or ClickUp tasks.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     user_id = str(update.effective_user.id)
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
     if user_id not in conversation_histories:
         conversation_histories[user_id] = []
+
     conversation_histories[user_id].append({"role": "user", "content": user_message})
-    if len(conversation_histories[user_id]) > 10:
-        conversation_histories[user_id] = conversation_histories[user_id][-10:]
+
+    # Keep only last 3 exchanges (6 messages)
+    if len(conversation_histories[user_id]) > 6:
+        conversation_histories[user_id] = conversation_histories[user_id][-6:]
+
+    model = pick_model(user_message)
+    logger.info(f"Using model: {model} for: {user_message[:50]}")
+
     try:
-        reply = get_claude_response(conversation_histories[user_id])
+        reply = get_claude_response(conversation_histories[user_id], model)
         conversation_histories[user_id].append({"role": "assistant", "content": reply})
         await update.message.reply_text(reply)
     except Exception as e:
