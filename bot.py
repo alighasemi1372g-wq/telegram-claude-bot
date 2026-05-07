@@ -23,6 +23,7 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 SYSTEM_PROMPT = """You are Ali's personal assistant. You have access to his ClickUp tasks and Zoho emails.
 When asked about tasks, use get_clickup_tasks.
 When asked about emails, use get_zoho_emails.
+When asked to send or reply to an email, use send_zoho_email.
 When asked to create a task, use create_clickup_task.
 Be concise. Respond in English. Never use markdown tables."""
 
@@ -93,26 +94,22 @@ def get_zoho_emails():
     try:
         token = get_zoho_access_token()
         if not token:
-            return "Zoho not connected. No refresh token set."
+            return "Zoho not connected."
         accounts_resp = requests.get(
             "https://mail.zoho.com/api/accounts",
             headers={"Authorization": f"Zoho-oauthtoken {token}"}
         ).json()
-        logger.info(f"Zoho accounts response: {accounts_resp}")
         accounts_data = accounts_resp.get("data", [])
         if not accounts_data:
-            return f"No Zoho accounts found: {accounts_resp}"
+            return f"No accounts found: {accounts_resp}"
         account_id = accounts_data[0].get("accountId")
-        if not account_id:
-            return f"No account ID found: {accounts_data[0]}"
         emails_resp = requests.get(
             f"https://mail.zoho.com/api/accounts/{account_id}/messages/view?limit=5&sortorder=false",
             headers={"Authorization": f"Zoho-oauthtoken {token}"}
         ).json()
-        logger.info(f"Zoho emails response: {emails_resp}")
         messages = emails_resp.get("data", [])
         if not messages:
-            return f"No emails found: {emails_resp}"
+            return f"No emails found."
         lines = []
         for m in messages:
             sender = m.get("fromAddress", "?")
@@ -122,6 +119,8 @@ def get_zoho_emails():
     except Exception as e:
         logger.error(f"Zoho error: {e}")
         return f"Error: {e}"
+
+
 def send_zoho_email(to, subject, body):
     try:
         token = get_zoho_access_token()
@@ -133,7 +132,7 @@ def send_zoho_email(to, subject, body):
         ).json()
         accounts_data = accounts_resp.get("data", [])
         if not accounts_data:
-            return f"No accounts found: {accounts_resp}"
+            return f"No accounts found."
         account_id = accounts_data[0].get("accountId")
         from_address = accounts_data[0].get("emailAddress")
         resp = requests.post(
@@ -152,6 +151,7 @@ def send_zoho_email(to, subject, body):
         return f"Error sending: {resp}"
     except Exception as e:
         return f"Error: {e}"
+
 
 def get_clickup_tasks(search=""):
     try:
@@ -193,6 +193,19 @@ tools = [
         "input_schema": {"type": "object", "properties": {}}
     },
     {
+        "name": "send_zoho_email",
+        "description": "Send or reply to an email via Zoho",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email address"},
+                "subject": {"type": "string", "description": "Email subject"},
+                "body": {"type": "string", "description": "Email body text"}
+            },
+            "required": ["to", "subject", "body"]
+        }
+    },
+    {
         "name": "get_clickup_tasks",
         "description": "Get Ali's ClickUp tasks, optionally filtered by keyword",
         "input_schema": {
@@ -232,6 +245,8 @@ def get_claude_response(messages):
         tool_use = next(b for b in response.content if b.type == "tool_use")
         if tool_use.name == "get_zoho_emails":
             tool_result = get_zoho_emails()
+        elif tool_use.name == "send_zoho_email":
+            tool_result = send_zoho_email(**tool_use.input)
         elif tool_use.name == "get_clickup_tasks":
             tool_result = get_clickup_tasks(**tool_use.input)
         elif tool_use.name == "create_clickup_task":
