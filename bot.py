@@ -122,7 +122,36 @@ def get_zoho_emails():
     except Exception as e:
         logger.error(f"Zoho error: {e}")
         return f"Error: {e}"
-
+def send_zoho_email(to, subject, body):
+    try:
+        token = get_zoho_access_token()
+        if not token:
+            return "Zoho not connected."
+        accounts_resp = requests.get(
+            "https://mail.zoho.com/api/accounts",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"}
+        ).json()
+        accounts_data = accounts_resp.get("data", [])
+        if not accounts_data:
+            return f"No accounts found: {accounts_resp}"
+        account_id = accounts_data[0].get("accountId")
+        from_address = accounts_data[0].get("emailAddress")
+        resp = requests.post(
+            f"https://mail.zoho.com/api/accounts/{account_id}/messages",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"},
+            json={
+                "fromAddress": from_address,
+                "toAddress": to,
+                "subject": subject,
+                "content": body,
+                "mailFormat": "plaintext"
+            }
+        ).json()
+        if resp.get("status", {}).get("code") == 200:
+            return f"Email sent to {to}!"
+        return f"Error sending: {resp}"
+    except Exception as e:
+        return f"Error: {e}"
 
 def get_clickup_tasks(search=""):
     try:
