@@ -9,142 +9,75 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 COMPOSIO_API_KEY = os.environ["COMPOSIO_API_KEY"]
 CLICKUP_API_KEY = os.environ["CLICKUP_API_KEY"]
+ZOHO_CLIENT_ID = os.environ["ZOHO_CLIENT_ID"]
+ZOHO_CLIENT_SECRET = os.environ["ZOHO_CLIENT_SECRET"]
+ZOHO_AUTH_CODE = os.environ.get("ZOHO_AUTH_CODE", "")
+ZOHO_REFRESH_TOKEN = os.environ.get("ZOHO_REFRESH_TOKEN", "")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-SYSTEM_PROMPT = """You are Ali's personal assistant. You have access to his ClickUp tasks.
-When asked about tasks, use the get_clickup_tasks tool.
-When asked to create a task, use the create_clickup_task tool.
-Format task lists as clean bullet points. Be concise and helpful. Respond in English."""
+SYSTEM_PROMPT = """You are Ali's personal assistant. You have access to his ClickUp tasks and Zoho emails.
+When asked about tasks, use get_clickup_tasks.
+When asked about emails, use get_zoho_emails.
+When asked to create a task, use create_clickup_task.
+Be concise. Respond in English. Never use markdown tables."""
 
 CLICKUP_HEADERS = {"Authorization": CLICKUP_API_KEY}
 
+zoho_access_token = None
+zoho_refresh_token = ZOHO_REFRESH_TOKEN
 
-def get_clickup_tasks():
+
+def get_zoho_access_token():
+    global zoho_access_token, zoho_refresh_token
+    if zoho_refresh_token:
+        resp = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
+            "refresh_token": zoho_refresh_token,
+            "client_id": ZOHO_CLIENT_ID,
+            "client_secret": ZOHO_CLIENT_SECRET,
+            "grant_type": "refresh_token"
+        }).json()
+        zoho_access_token = resp.get("access_token")
+        return zoho_access_token
+    elif ZOHO_AUTH_CODE:
+        resp = requests.post("https://accounts.zoho.com/oauth/v2/token", data={
+            "code": ZOHO_AUTH_CODE,
+            "client_id": ZOHO_CLIENT_ID,
+            "client_secret": ZOHO_CLIENT_SECRET,
+            "redirect_uri": "https://localhost",
+            "grant_type": "authorization_code"
+        }).json()
+        logger.info(f"Zoho token exchange: {resp}")
+        zoho_refresh_token = resp.get("refresh_token", "")
+        zoho_access_token = resp.get("access_token")
+        if zoho_refresh_token:
+            logger.info(f"SAVE THIS REFRESH TOKEN: {zoho_refresh_token}")
+        return zoho_access_token
+    return None
+
+
+def get_zoho_emails():
     try:
-        teams = requests.get("https://api.clickup.com/api/v2/team", headers=CLICKUP_HEADERS).json()
-        team_id = teams["teams"][0]["id"]
-        tasks = requests.get(
-            f"https://api.clickup.com/api/v2/team/{team_id}/task?include_closed=false&page=0",
-            headers=CLICKUP_HEADERS
+        token = get_zoho_access_token()
+        if not token:
+            return "Zoho not connected."
+        accounts = requests.get(
+            "https://mail.zoho.com/api/accounts",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"}
         ).json()
-        all_tasks = tasks.get("tasks", [])[:10]
-        summary = []
-        for t in all_tasks:
-            name = t.get("name", "?")
-            status = t.get("status", {}).get("status", "?")
-            priority = t.get("priority", {}).get("priority", "-") if t.get("priority") else "-"
-            summary.append(f"• {name} | {status} | {priority}")
-        return "\n".join(summary)
-    except Exception as e:
-        return f"Error fetching tasks: {e}"
-
-
-def create_clickup_task(name, list_id, description=""):
-    try:
-        data = {"name": name, "description": description}
-        result = requests.post(
-            f"https://api.clickup.com/api/v2/list/{list_id}/task",
-            headers=CLICKUP_HEADERS,
-            json=data
+        account_id = accounts["data"][0]["accountId"]
+        emails = requests.get(
+            f"https://mail.zoho.com/api/accounts/{account_id}/messages/view?limit=5&sortorder=false",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"}
         ).json()
-        return result
-    except Exception as e:
-        return f"Error creating task: {e}"
-
-
-tools = [
-    {
-        "name": "get_clickup_tasks",
-        "description": "Get Ali's current ClickUp tasks",
-        "input_schema": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "create_clickup_task",
-        "description": "Create a new task in ClickUp",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Task name"},
-                "description": {"type": "string", "description": "Task description"},
-                "list_id": {"type": "string", "description": "ClickUp list ID"}
-            },
-            "required": ["name", "list_id"]
-        }
-    }
-]
-
-conversation_histories = {}
-
-
-def get_claude_response(messages):
-    response = claude_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1000,
-        system=SYSTEM_PROMPT,
-        messages=messages,
-        tools=tools
-    )
-    if response.stop_reason == "tool_use":
-        tool_use = next(b for b in response.content if b.type == "tool_use")
-        if tool_use.name == "get_clickup_tasks":
-            tool_result = get_clickup_tasks()
-        elif tool_use.name == "create_clickup_task":
-            tool_result = str(create_clickup_task(**tool_use.input))
-        else:
-            tool_result = "Unknown tool"
-        messages = messages + [
-            {"role": "assistant", "content": response.content},
-            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": tool_result}]}
-        ]
-        response = claude_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-            tools=tools
-        )
-    return response.content[0].text
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hello Ali! I'm your Claude Assistant. I can help with ClickUp tasks and more!")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-    user_id = str(update.effective_user.id)
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    if user_id not in conversation_histories:
-        conversation_histories[user_id] = []
-    conversation_histories[user_id].append({"role": "user", "content": user_message})
-    if len(conversation_histories[user_id]) > 20:
-        conversation_histories[user_id] = conversation_histories[user_id][-20:]
-    try:
-        reply = get_claude_response(conversation_histories[user_id])
-        conversation_histories[user_id].append({"role": "assistant", "content": reply})
-        await update.message.reply_text(reply)
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text(f"Error: {str(e)[:200]}")
-
-
-async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conversation_histories[str(update.effective_user.id)] = []
-    await update.message.reply_text("✅ Cleared.")
-
-
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("clear", clear))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Bot running...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
+        messages = emails.get("data", [])
+        if not messages:
+            return "No emails found."
+        lines = []
+        for m in messages:
+            sender = m.get("fromAddress", "?")
+            subject = m.get("subject", "(no subject)")
+            lines.appen
