@@ -46,7 +46,6 @@ class TokenHandler(BaseHTTPRequestHandler):
                     "redirect_uri": f"https://{self.headers.get('Host')}/zoho-auth",
                     "grant_type": "authorization_code"
                 }).json()
-                logger.info(f"Zoho exchange result: {resp}")
                 rt = resp.get("refresh_token", "")
                 at = resp.get("access_token", "")
                 if rt:
@@ -73,7 +72,6 @@ class TokenHandler(BaseHTTPRequestHandler):
 def start_web_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), TokenHandler)
-    logger.info(f"Web server on port {port}")
     server.serve_forever()
 
 
@@ -96,18 +94,25 @@ def get_zoho_emails():
         token = get_zoho_access_token()
         if not token:
             return "Zoho not connected. No refresh token set."
-        accounts = requests.get(
+        accounts_resp = requests.get(
             "https://mail.zoho.com/api/accounts",
             headers={"Authorization": f"Zoho-oauthtoken {token}"}
         ).json()
-        account_id = accounts["data"][0]["accountId"]
-        emails = requests.get(
+        logger.info(f"Zoho accounts response: {accounts_resp}")
+        accounts_data = accounts_resp.get("data", [])
+        if not accounts_data:
+            return f"No Zoho accounts found: {accounts_resp}"
+        account_id = accounts_data[0].get("accountId")
+        if not account_id:
+            return f"No account ID found: {accounts_data[0]}"
+        emails_resp = requests.get(
             f"https://mail.zoho.com/api/accounts/{account_id}/messages/view?limit=5&sortorder=false",
             headers={"Authorization": f"Zoho-oauthtoken {token}"}
         ).json()
-        messages = emails.get("data", [])
+        logger.info(f"Zoho emails response: {emails_resp}")
+        messages = emails_resp.get("data", [])
         if not messages:
-            return "No emails found."
+            return f"No emails found: {emails_resp}"
         lines = []
         for m in messages:
             sender = m.get("fromAddress", "?")
@@ -115,6 +120,7 @@ def get_zoho_emails():
             lines.append(f"• From: {sender}\n  Subject: {subject}")
         return "\n".join(lines)
     except Exception as e:
+        logger.error(f"Zoho error: {e}")
         return f"Error: {e}"
 
 
