@@ -30,9 +30,11 @@ HAIKU = "claude-haiku-4-5"
 SONNET = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """You are Ali's personal assistant. You have tools for ClickUp tasks and Zoho emails.
-Use get_zoho_emails for latest emails, search_zoho_emails to find emails by keyword/sender/subject.
+Use get_zoho_emails for recent 50 emails (latest first), search_zoho_emails to find emails by keyword/sender/subject (up to 50 results).
 Use get_clickup_tasks for tasks, send_zoho_email to send, create_clickup_task to create tasks.
 When asked about a specific person, company, or topic, always use search_zoho_emails.
+When analyzing emails by time (e.g. "emails in last 24 hours"), use get_zoho_emails to fetch recent emails
+and analyze their timestamps to filter results.
 When the user asks to analyze, review, compare, or summarize contracts/agreements/documents
 for a specific company and topic (e.g. "analyze Dupilumab contract from Excellgene"), call
 analyze_contracts with company and topic — do NOT use search_zoho_emails for that.
@@ -123,10 +125,15 @@ def get_zoho_account():
 def format_messages(msgs):
     if not msgs:
         return "No emails found."
-    return "\n".join([
-        f"{i+1}. From: {m.get('fromAddress','?')} | {m.get('subject','(no subject)')}"
-        for i, m in enumerate(msgs)
-    ])
+    lines = []
+    for i, m in enumerate(msgs):
+        date_str = m.get('receivedTime') or m.get('sentTime') or m.get('date') or '?'
+        if isinstance(date_str, str) and len(date_str) > 19:
+            date_str = date_str[:19]
+        from_addr = m.get('fromAddress', '?')
+        subject = m.get('subject', '(no subject)')
+        lines.append(f"{i+1}. [{date_str}] From: {from_addr} | {subject}")
+    return "\n".join(lines)
 
 
 def get_zoho_emails():
@@ -135,7 +142,7 @@ def get_zoho_emails():
         if not token:
             return "Zoho not connected."
         msgs = requests.get(
-            f"https://mail.zoho.com/api/accounts/{aid}/messages/view?limit=5&sortorder=false",
+            f"https://mail.zoho.com/api/accounts/{aid}/messages/view?limit=50&sortorder=false",
             headers={"Authorization": f"Zoho-oauthtoken {token}"}
         ).json().get("data", [])
         return format_messages(msgs)
@@ -157,7 +164,7 @@ def search_zoho_emails(query):
         msgs = requests.get(
             f"https://mail.zoho.com/api/accounts/{aid}/messages/search",
             headers={"Authorization": f"Zoho-oauthtoken {token}"},
-            params={"searchKey": search_key, "limit": 10, "sortorder": "false"}
+            params={"searchKey": search_key, "limit": 50, "sortorder": "false"}
         ).json().get("data", [])
         return format_messages(msgs)
     except Exception as e:
