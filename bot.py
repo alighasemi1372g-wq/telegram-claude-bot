@@ -44,7 +44,7 @@ zoho_refresh_token = ZOHO_REFRESH_TOKEN
 CONTRACTS_MEMORY_PATH = os.environ.get("CONTRACTS_MEMORY_PATH", "contracts_memory.json")
 
 MAX_ATTACHMENTS_PER_RUN = 2
-MAX_ATTACHMENT_CHARS = 5000
+MAX_ATTACHMENT_CHARS = 3000
 
 
 def pick_model(text):
