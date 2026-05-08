@@ -31,8 +31,10 @@ SONNET = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """You are Ali's personal assistant. You have tools for ClickUp tasks and Zoho emails.
 Use get_zoho_emails for recent 50 emails (latest first), search_zoho_emails to find emails by keyword/sender/subject (up to 50 results).
+Use get_email_details to fetch full email content (body, attachments, all recipients, etc.) when user asks for details on a specific email.
 Use get_clickup_tasks for tasks, send_zoho_email to send, create_clickup_task to create tasks.
 When asked about a specific person, company, or topic, always use search_zoho_emails.
+When user asks for more details on an email, use get_email_details with the sender email or subject keywords.
 When analyzing emails by time (e.g. "emails in last 24 hours"), use get_zoho_emails to fetch recent emails
 and analyze their timestamps to filter results.
 When the user asks to analyze, review, compare, or summarize contracts/agreements/documents
@@ -169,6 +171,67 @@ def search_zoho_emails(query):
         return format_messages(msgs)
     except Exception as e:
         return f"Error: {e}"
+
+
+def get_email_details(search_term):
+    try:
+        token, aid, _ = get_zoho_account()
+        if not token:
+            return "Zoho not connected."
+        q = search_term.strip()
+        if "@" in q and " " not in q:
+            search_key = f"sender:{q}"
+        else:
+            search_key = f'subject:"{q}"' if " " in q else f"entire:{q}"
+        msgs = requests.get(
+            f"https://mail.zoho.com/api/accounts/{aid}/messages/search",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"},
+            params={"searchKey": search_key, "limit": 1, "sortorder": "false"}
+        ).json().get("data", [])
+        if not msgs:
+            return f"No email found matching '{search_term}'"
+        msg = msgs[0]
+        msg_id = msg.get("messageId")
+        folder_id = msg.get("folderId")
+        r = requests.get(
+            f"https://mail.zoho.com/api/accounts/{aid}/messages/{msg_id}",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"}
+        ).json()
+        data = r.get("data", {})
+        from_addr = data.get("fromAddress", "?")
+        to_addr = data.get("toAddress", "?")
+        cc_addr = data.get("ccAddress", "") or data.get("cc", "")
+        subject = data.get("subject", "(no subject)")
+        date_str = data.get("receivedTime") or data.get("sentTime") or "?"
+        body = data.get("body") or data.get("content") or "(no text)"
+        if len(body) > 8000:
+            body = body[:8000] + "\n\n[...truncated...]"
+        attachments = []
+        if data.get("hasAttachment") and folder_id:
+            try:
+                atts = list_zoho_attachments(token, aid, folder_id, msg_id)
+                for a in atts:
+                    size = a.get("size", "?")
+                    name = a.get("attachmentName", "unknown")
+                    attachments.append(f"{name} ({size} bytes)")
+            except Exception:
+                pass
+        details = (
+            f"From: {from_addr}\n"
+            f"To: {to_addr}\n"
+        )
+        if cc_addr:
+            details += f"CC: {cc_addr}\n"
+        details += (
+            f"Date: {date_str}\n"
+            f"Subject: {subject}\n\n"
+            f"Body:\n{body}\n\n"
+            f"Attachments: {', '.join(attachments) if attachments else '(none)'}"
+        )
+        return details
+    except Exception as e:
+        logger.exception("get_email_details failed")
+        return f"Error: {str(e)[:200]}"
 
 
 def send_zoho_email(to, subject, body):
@@ -674,6 +737,17 @@ tools = [
         }
     },
     {
+        "name": "get_email_details",
+        "description": "Get full details of a specific email (sender, body, all recipients, attachments, date, etc.)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "search_term": {"type": "string", "description": "Sender email (e.g. john@example.com) or subject keywords (e.g. 'project update')"}
+            },
+            "required": ["search_term"]
+        }
+    },
+    {
         "name": "send_zoho_email",
         "description": "Send an email via Zoho",
         "input_schema": {
@@ -780,6 +854,8 @@ def get_claude_response(messages, model):
             result = get_zoho_emails()
         elif tool_use.name == "search_zoho_emails":
             result = search_zoho_emails(**tool_use.input)
+        elif tool_use.name == "get_email_details":
+            result = get_email_details(**tool_use.input)
         elif tool_use.name == "send_zoho_email":
             result = send_zoho_email(**tool_use.input)
         elif tool_use.name == "get_clickup_tasks":
