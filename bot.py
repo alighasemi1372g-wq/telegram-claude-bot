@@ -253,6 +253,22 @@ def download_zoho_attachment(token, aid, folder_id, msg_id, att_id):
     return r.content
 
 
+def get_email_body(token, aid, msg_id):
+    try:
+        r = requests.get(
+            f"https://mail.zoho.com/api/accounts/{aid}/messages/{msg_id}",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"}
+        ).json()
+        data = r.get("data", {})
+        body = data.get("body") or data.get("content") or ""
+        if len(body) > MAX_ATTACHMENT_CHARS:
+            body = body[:MAX_ATTACHMENT_CHARS]
+        return body.strip()
+    except Exception as e:
+        logger.warning(f"get_email_body failed for {msg_id}: {e}")
+        return ""
+
+
 def extract_docx_text(data):
     from docx import Document
     doc = Document(io.BytesIO(data))
@@ -321,7 +337,7 @@ ANALYSIS_INSTRUCTIONS = (
 )
 
 
-def analyze_attachment_with_claude(company, topic, filename, version, prev_summary, content_block):
+def analyze_attachment_with_claude(company, topic, filename, version, prev_summary, content_block, email_body=""):
     prev_compact = None
     if prev_summary:
         prev_compact = {
@@ -335,10 +351,15 @@ def analyze_attachment_with_claude(company, topic, filename, version, prev_summa
         version=version,
         prev_summary=json.dumps(prev_compact, ensure_ascii=False) if prev_compact else "null",
     )
+    content = []
+    if email_body:
+        content.append({"type": "text", "text": f"[Email body]\n{email_body}"})
+    content.append(content_block)
+    content.append({"type": "text", "text": instructions})
     resp = claude_client.messages.create(
         model=HAIKU,
         max_tokens=800,
-        messages=[{"role": "user", "content": [content_block, {"type": "text", "text": instructions}]}],
+        messages=[{"role": "user", "content": content}],
     )
     text = resp.content[0].text.strip()
     if text.startswith("```"):
@@ -436,6 +457,7 @@ def process_contract_candidates(company, topic, info):
     for msg_id, folder_id, att_id, name in candidates:
         key_id = f"{msg_id}:{att_id}"
         try:
+            email_body = get_email_body(token, aid, msg_id)
             data = download_zoho_attachment(token, aid, folder_id, msg_id, att_id)
             block = build_attachment_block(name, data)
             if block is None:
@@ -445,7 +467,7 @@ def process_contract_candidates(company, topic, info):
             prev = record["versions"][-1] if record["versions"] else None
             next_version = record["current_version"] + 1
             result = analyze_attachment_with_claude(
-                company, topic, name, next_version, prev, block
+                company, topic, name, next_version, prev, block, email_body
             )
         except Exception as e:
             logger.exception(f"analysis failed for {name}")
