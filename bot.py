@@ -32,6 +32,9 @@ SYSTEM_PROMPT = """You are Ali's personal assistant. You have tools for ClickUp 
 Use get_zoho_emails for latest emails, search_zoho_emails to find emails by keyword/sender/subject.
 Use get_clickup_tasks for tasks, send_zoho_email to send, create_clickup_task to create tasks.
 When asked about a specific person, company, or topic, always use search_zoho_emails.
+When the user asks to analyze, review, compare, or summarize contracts/agreements/documents
+for a specific company and topic (e.g. "analyze Dupilumab contract from Excellgene"), call
+analyze_contracts with company and topic — do NOT use search_zoho_emails for that.
 Be very concise. Plain text only. No markdown tables."""
 
 CLICKUP_HEADERS = {"Authorization": CLICKUP_API_KEY}
@@ -539,6 +542,25 @@ tools = [
             },
             "required": ["name", "list_id"]
         }
+    },
+    {
+        "name": "analyze_contracts",
+        "description": (
+            "Analyze contract/agreement documents (PDF, DOCX, XLSX) attached to "
+            "Zoho emails between Ali and a specific company on a specific topic. "
+            "Returns a versioned summary with key terms, open issues, and a diff "
+            "from the previous version. Use this whenever the user asks to "
+            "analyze/review/compare/summarize contracts or documents for a "
+            "company+topic pair."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "company": {"type": "string", "description": "Company name, e.g. Excellgene"},
+                "topic": {"type": "string", "description": "Contract topic, e.g. Dupilumab"}
+            },
+            "required": ["company", "topic"]
+        }
     }
 ]
 
@@ -598,6 +620,13 @@ def get_claude_response(messages, model):
             result = get_clickup_tasks(**tool_use.input)
         elif tool_use.name == "create_clickup_task":
             result = create_clickup_task(**tool_use.input)
+        elif tool_use.name == "analyze_contracts":
+            err, data = analyze_contracts(**tool_use.input)
+            if err:
+                return err
+            return format_contract_comparison(
+                data["record"], data["new_count"], data["skipped"], data["failed"]
+            )
         else:
             result = "Unknown tool"
         messages = messages + [
