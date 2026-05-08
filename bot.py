@@ -664,11 +664,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Model: {model} | Message: {user_message[:50]}")
 
     try:
-        reply = get_claude_response(conversation_histories[user_id], model)
+        reply = await asyncio.to_thread(
+            get_claude_response, conversation_histories[user_id], model
+        )
         conversation_histories[user_id].append({"role": "assistant", "content": reply})
         await update.message.reply_text(reply)
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.exception("handle_message failed")
         await update.message.reply_text(f"Error: {str(e)[:200]}")
 
 
