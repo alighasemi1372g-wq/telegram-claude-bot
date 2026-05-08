@@ -134,9 +134,16 @@ def search_zoho_emails(query):
         token, aid, _ = get_zoho_account()
         if not token:
             return "Zoho not connected."
+        q = query.strip()
+        if "@" in q and " " not in q:
+            search_key = f"sender:{q}"
+        else:
+            value = f'"{q}"' if " " in q else q
+            search_key = f"entire:{value}"
         msgs = requests.get(
-            f"https://mail.zoho.com/api/accounts/{aid}/messages/view?limit=10&sortorder=false&searchKey={query}",
-            headers={"Authorization": f"Zoho-oauthtoken {token}"}
+            f"https://mail.zoho.com/api/accounts/{aid}/messages/search",
+            headers={"Authorization": f"Zoho-oauthtoken {token}"},
+            params={"searchKey": search_key, "limit": 10, "sortorder": "false"}
         ).json().get("data", [])
         return format_messages(msgs)
     except Exception as e:
