@@ -545,7 +545,41 @@ tools = [
 conversation_histories = {}
 
 
+def _block_type(block):
+    if isinstance(block, dict):
+        return block.get("type")
+    return getattr(block, "type", None)
+
+
+def clean_orphan_tool_uses(messages):
+    cleaned = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        content = msg.get("content")
+        has_tool_use = (
+            msg.get("role") == "assistant"
+            and isinstance(content, list)
+            and any(_block_type(b) == "tool_use" for b in content)
+        )
+        if has_tool_use:
+            nxt = messages[i + 1] if i + 1 < len(messages) else None
+            nxt_has_tool_result = (
+                nxt is not None
+                and nxt.get("role") == "user"
+                and isinstance(nxt.get("content"), list)
+                and any(_block_type(b) == "tool_result" for b in nxt["content"])
+            )
+            if not nxt_has_tool_result:
+                i += 1
+                continue
+        cleaned.append(msg)
+        i += 1
+    return cleaned
+
+
 def get_claude_response(messages, model):
+    messages = clean_orphan_tool_uses(messages)
     response = claude_client.messages.create(
         model=model,
         max_tokens=400,
@@ -578,8 +612,7 @@ def get_claude_response(messages, model):
             messages=messages,
             tools=tools
         )
-    text_block = next((b for b in response.content if getattr(b, "type", None) == "text"), None)
-    return text_block.text if text_block else ""
+    return next((b.text for b in response.content if hasattr(b, 'text')), 'Done.')
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
