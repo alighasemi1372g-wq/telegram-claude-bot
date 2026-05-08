@@ -578,7 +578,8 @@ def get_claude_response(messages, model):
             messages=messages,
             tools=tools
         )
-    return response.content[0].text
+    text_block = next((b for b in response.content if getattr(b, "type", None) == "text"), None)
+    return text_block.text if text_block else ""
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
