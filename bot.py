@@ -579,12 +579,11 @@ def clean_orphan_tool_uses(messages):
 
 
 def get_claude_response(messages, model):
-    messages = clean_orphan_tool_uses(messages)
     response = claude_client.messages.create(
         model=model,
         max_tokens=400,
         system=SYSTEM_PROMPT,
-        messages=messages,
+        messages=clean_orphan_tool_uses(messages),
         tools=tools
     )
     if response.stop_reason == "tool_use":
@@ -609,7 +608,7 @@ def get_claude_response(messages, model):
             model=model,
             max_tokens=400,
             system=SYSTEM_PROMPT,
-            messages=messages,
+            messages=clean_orphan_tool_uses(messages),
             tools=tools
         )
     return next((b.text for b in response.content if hasattr(b, 'text')), 'Done.')
@@ -645,7 +644,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conversation_histories[str(update.effective_user.id)] = []
+    user_id = str(update.effective_user.id)
+    conversation_histories.pop(user_id, None)
+    conversation_histories[user_id] = []
     await update.message.reply_text("✅ Cleared.")
 
 
