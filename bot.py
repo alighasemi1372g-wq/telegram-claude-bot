@@ -43,6 +43,9 @@ zoho_refresh_token = ZOHO_REFRESH_TOKEN
 
 CONTRACTS_MEMORY_PATH = os.environ.get("CONTRACTS_MEMORY_PATH", "contracts_memory.json")
 
+MAX_ATTACHMENTS_PER_RUN = 2
+MAX_ATTACHMENT_CHARS = 5000
+
 
 def pick_model(text):
     heavy = ["draft", "write", "analyze", "analyse", "summarize", "summarise", "compose", "explain", "detail"]
@@ -275,42 +278,46 @@ def extract_xlsx_text(data):
     return "\n".join(parts)
 
 
+def extract_pdf_text(data):
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(data))
+    parts = []
+    for page in reader.pages:
+        try:
+            t = page.extract_text() or ""
+        except Exception:
+            t = ""
+        if t.strip():
+            parts.append(t)
+    return "\n".join(parts)
+
+
 def build_attachment_block(filename, data):
     name = (filename or "").lower()
     if name.endswith(".pdf"):
-        return {
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": "application/pdf",
-                "data": base64.standard_b64encode(data).decode("ascii"),
-            },
-        }
-    if name.endswith(".docx"):
+        kind = "Document"
+        text = extract_pdf_text(data)
+    elif name.endswith(".docx"):
+        kind = "Document"
         text = extract_docx_text(data)
-        return {"type": "text", "text": f"[Document: {filename}]\n\n{text}"}
-    if name.endswith((".xlsx", ".xlsm")):
+    elif name.endswith((".xlsx", ".xlsm")):
+        kind = "Spreadsheet"
         text = extract_xlsx_text(data)
-        return {"type": "text", "text": f"[Spreadsheet: {filename}]\n\n{text}"}
-    return None
+    else:
+        return None
+    if not text.strip():
+        text = "(no extractable text)"
+    if len(text) > MAX_ATTACHMENT_CHARS:
+        text = text[:MAX_ATTACHMENT_CHARS] + f"\n\n[truncated at {MAX_ATTACHMENT_CHARS} chars]"
+    return {"type": "text", "text": f"[{kind}: {filename}]\n\n{text}"}
 
 
 ANALYSIS_INSTRUCTIONS = (
-    "You are reviewing a document attached to an email thread between Ali and {company} "
-    "about the topic '{topic}'. Extract a structured summary of this document.\n\n"
-    "Document filename: {filename}\n"
-    "Version number to assign: {version}\n\n"
-    "Previous version summary (use to compute diff; null means this is the first version):\n"
-    "{prev_summary}\n\n"
-    "Return STRICT JSON only — no prose, no markdown fences. Schema:\n"
-    "{{\n"
-    '  "date": "<ISO date the document is dated, or today if none>",\n'
-    '  "key_terms": [<short bullet strings, max 10>],\n'
-    '  "open_issues": [<strings>],\n'
-    '  "resolved_issues": [<strings — issues from previous version that this version resolves; [] if no previous>],\n'
-    '  "changes_from_previous": [<strings — concrete diffs from previous version>] | null\n'
-    "}}\n\n"
-    "If there is no previous version, set changes_from_previous to null and resolved_issues to []."
+    "Summarize this {company}/{topic} contract doc (v{version}). "
+    "Prev: {prev_summary}\n"
+    "Return ONLY JSON, no fences:\n"
+    '{{"date":"ISO or today","key_terms":[...max 8],"open_issues":[...],'
+    '"resolved_issues":[...or []],"changes_from_previous":[...or null]}}'
 )
 
 
@@ -318,21 +325,19 @@ def analyze_attachment_with_claude(company, topic, filename, version, prev_summa
     prev_compact = None
     if prev_summary:
         prev_compact = {
-            "version": prev_summary.get("version"),
-            "date": prev_summary.get("date"),
+            "v": prev_summary.get("version"),
             "key_terms": prev_summary.get("key_terms"),
             "open_issues": prev_summary.get("open_issues"),
         }
     instructions = ANALYSIS_INSTRUCTIONS.format(
         company=company,
         topic=topic,
-        filename=filename,
         version=version,
         prev_summary=json.dumps(prev_compact, ensure_ascii=False) if prev_compact else "null",
     )
     resp = claude_client.messages.create(
-        model=SONNET,
-        max_tokens=2000,
+        model=HAIKU,
+        max_tokens=800,
         messages=[{"role": "user", "content": [content_block, {"type": "text", "text": instructions}]}],
     )
     text = resp.content[0].text.strip()
@@ -344,7 +349,7 @@ def analyze_attachment_with_claude(company, topic, filename, version, prev_summa
     return json.loads(text)
 
 
-def analyze_contracts(company, topic):
+def find_contract_attachments(company, topic, max_n):
     token, aid, _ = get_zoho_account()
     if not token:
         return "Zoho not connected.", None
@@ -353,7 +358,7 @@ def analyze_contracts(company, topic):
     msgs = requests.get(
         f"https://mail.zoho.com/api/accounts/{aid}/messages/search",
         headers={"Authorization": f"Zoho-oauthtoken {token}"},
-        params={"searchKey": search_key, "limit": 50, "sortorder": "true"},
+        params={"searchKey": search_key, "limit": 50, "sortorder": "false"},
     ).json().get("data") or []
 
     if not msgs:
@@ -371,11 +376,12 @@ def analyze_contracts(company, topic):
     }
     processed = set(record["processed_attachments"])
 
-    new_count = 0
-    skipped = []
-    failed = []
+    candidates = []
+    skipped_unsupported = []
 
     for m in msgs:
+        if len(candidates) >= max_n:
+            break
         if str(m.get("hasAttachment", "0")) != "1":
             continue
         msg_id = m.get("messageId")
@@ -395,47 +401,83 @@ def analyze_contracts(company, topic):
             key_id = f"{msg_id}:{att_id}"
             if key_id in processed:
                 continue
-            ext_supported = name.lower().endswith((".pdf", ".docx", ".xlsx", ".xlsm"))
-            if not ext_supported:
+            if not name.lower().endswith((".pdf", ".docx", ".xlsx", ".xlsm")):
+                skipped_unsupported.append(name)
+                continue
+            candidates.append((msg_id, folder_id, att_id, name))
+            if len(candidates) >= max_n:
+                break
+
+    return None, {
+        "token": token,
+        "aid": aid,
+        "memory": memory,
+        "key": key,
+        "record": record,
+        "processed": processed,
+        "candidates": candidates,
+        "skipped_unsupported": skipped_unsupported,
+        "email_count": len(msgs),
+    }
+
+
+def process_contract_candidates(company, topic, info):
+    token = info["token"]
+    aid = info["aid"]
+    memory = info["memory"]
+    key = info["key"]
+    record = info["record"]
+    processed = info["processed"]
+    candidates = info["candidates"]
+    skipped = list(info["skipped_unsupported"])
+    failed = []
+    new_count = 0
+
+    for msg_id, folder_id, att_id, name in candidates:
+        key_id = f"{msg_id}:{att_id}"
+        try:
+            data = download_zoho_attachment(token, aid, folder_id, msg_id, att_id)
+            block = build_attachment_block(name, data)
+            if block is None:
                 skipped.append(name)
                 processed.add(key_id)
                 continue
-            try:
-                data = download_zoho_attachment(token, aid, folder_id, msg_id, att_id)
-                block = build_attachment_block(name, data)
-                if block is None:
-                    skipped.append(name)
-                    processed.add(key_id)
-                    continue
-                prev = record["versions"][-1] if record["versions"] else None
-                next_version = record["current_version"] + 1
-                result = analyze_attachment_with_claude(
-                    company, topic, name, next_version, prev, block
-                )
-            except Exception as e:
-                logger.exception(f"analysis failed for {name}")
-                failed.append(f"{name}: {str(e)[:80]}")
-                continue
-            result["version"] = next_version
-            result["company"] = company
-            result["topic"] = topic
-            result["source"] = {"message_id": msg_id, "attachment_id": att_id, "filename": name}
-            record["versions"].append(result)
-            record["current_version"] = next_version
-            record["last_updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            processed.add(key_id)
-            new_count += 1
+            prev = record["versions"][-1] if record["versions"] else None
+            next_version = record["current_version"] + 1
+            result = analyze_attachment_with_claude(
+                company, topic, name, next_version, prev, block
+            )
+        except Exception as e:
+            logger.exception(f"analysis failed for {name}")
+            failed.append(f"{name}: {str(e)[:80]}")
+            continue
+        result["version"] = next_version
+        result["company"] = company
+        result["topic"] = topic
+        result["source"] = {"message_id": msg_id, "attachment_id": att_id, "filename": name}
+        record["versions"].append(result)
+        record["current_version"] = next_version
+        record["last_updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        processed.add(key_id)
+        new_count += 1
 
     record["processed_attachments"] = sorted(processed)
     memory["contracts"][key] = record
     save_contracts_memory(memory)
 
-    return None, {
+    return {
         "record": record,
         "new_count": new_count,
         "skipped": skipped,
         "failed": failed,
     }
+
+
+def analyze_contracts(company, topic):
+    err, info = find_contract_attachments(company, topic, MAX_ATTACHMENTS_PER_RUN)
+    if err:
+        return err, None
+    return None, process_contract_candidates(company, topic, info)
 
 
 def format_contract_comparison(record, new_count, skipped, failed):
@@ -790,12 +832,20 @@ async def analyze_contracts_cmd(update: Update, context: ContextTypes.DEFAULT_TY
     company = args[0]
     topic = " ".join(args[1:])
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    await update.message.reply_text(f"Analyzing {company} / {topic}… this may take a minute.")
+    await update.message.reply_text(f"Searching emails for {company} / {topic}…")
     try:
-        err, result = await asyncio.to_thread(analyze_contracts, company, topic)
+        err, info = await asyncio.to_thread(
+            find_contract_attachments, company, topic, MAX_ATTACHMENTS_PER_RUN
+        )
         if err:
             await update.message.reply_text(err)
             return
+        n_atts = len(info["candidates"])
+        await update.message.reply_text(
+            f"Found {info['email_count']} emails, analyzing {n_atts} attachment{'s' if n_atts != 1 else ''}"
+            f" (max {MAX_ATTACHMENTS_PER_RUN}/run, Haiku, {MAX_ATTACHMENT_CHARS} char cap)…"
+        )
+        result = await asyncio.to_thread(process_contract_candidates, company, topic, info)
         record = result["record"]
         new_count = result["new_count"]
         skipped = result["skipped"]
