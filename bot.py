@@ -6,6 +6,7 @@ import asyncio
 import logging
 import threading
 from datetime import datetime, timezone
+from html import escape as html_escape
 import anthropic
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -490,6 +491,100 @@ def format_contract_comparison(record, new_count, skipped, failed):
     return text
 
 
+_HTML_CSS = """
+body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 1200px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+h2 { font-size: 1rem; margin-top: 1.5rem; color: #333; }
+.meta { color: #666; margin-bottom: 1.5rem; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; table-layout: fixed; }
+th, td { border: 1px solid #ddd; padding: 0.6rem; vertical-align: top; word-wrap: break-word; overflow-wrap: break-word; }
+th { background: #f4f4f4; text-align: left; font-weight: 600; }
+th.section { width: 14%; background: #fafafa; }
+.latest { background: #fff7d6; }
+ul { margin: 0; padding-left: 1.2rem; }
+li { margin: 0.15rem 0; }
+.none { color: #aaa; }
+small { color: #666; font-weight: normal; display: block; margin-top: 2px; }
+.empty { color: #888; font-style: italic; }
+"""
+
+
+def _ul_or_dash(items):
+    items = [str(x) for x in (items or []) if x]
+    if not items:
+        return '<span class="none">—</span>'
+    return "<ul>" + "".join(f"<li>{html_escape(x)}</li>" for x in items) + "</ul>"
+
+
+def build_contract_html(record, new_count, skipped, failed):
+    company = record.get("company", "?")
+    topic = record.get("topic", "?")
+    versions = record.get("versions") or []
+    last_updated = record.get("last_updated", "?")
+    title = f"{company} — {topic}"
+
+    head = (
+        '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        f'<title>{html_escape(title)}</title>\n'
+        f'<style>{_HTML_CSS}</style>\n</head>\n<body>\n'
+    )
+
+    if not versions:
+        body = (
+            f'<h1>{html_escape(title)}</h1>\n'
+            '<p class="empty">No supported attachments analyzed.</p>\n'
+        )
+        return head + body + '</body>\n</html>\n'
+
+    latest_idx = len(versions) - 1
+
+    header_cells = ['<th class="section">Section</th>']
+    for i, v in enumerate(versions):
+        cls = ' class="latest"' if i == latest_idx else ''
+        ver = html_escape(str(v.get("version", "?")))
+        date = html_escape(str(v.get("date", "?")))
+        header_cells.append(f'<th{cls}>v{ver}<small>{date}</small></th>')
+    header_row = '<tr>' + ''.join(header_cells) + '</tr>'
+
+    def row(label, extract):
+        cells = [f'<th class="section">{html_escape(label)}</th>']
+        for i, v in enumerate(versions):
+            cls = ' class="latest"' if i == latest_idx else ''
+            cells.append(f'<td{cls}>{extract(v)}</td>')
+        return '<tr>' + ''.join(cells) + '</tr>'
+
+    rows = [
+        row("Source file", lambda v: html_escape(str((v.get("source") or {}).get("filename", "?")))),
+        row("Date", lambda v: html_escape(str(v.get("date", "?")))),
+        row("Key terms", lambda v: _ul_or_dash(v.get("key_terms"))),
+        row("Open issues", lambda v: _ul_or_dash(v.get("open_issues"))),
+        row("Resolved issues", lambda v: _ul_or_dash(v.get("resolved_issues"))),
+        row("Changes from previous", lambda v: _ul_or_dash(v.get("changes_from_previous"))),
+    ]
+
+    table_html = (
+        '<table>\n<thead>\n' + header_row + '\n</thead>\n<tbody>\n'
+        + '\n'.join(rows) + '\n</tbody>\n</table>\n'
+    )
+
+    extras = []
+    if skipped:
+        items = ''.join(f'<li>{html_escape(str(s))}</li>' for s in skipped)
+        extras.append(f'<h2>Skipped (unsupported)</h2>\n<ul>{items}</ul>\n')
+    if failed:
+        items = ''.join(f'<li>{html_escape(str(s))}</li>' for s in failed)
+        extras.append(f'<h2>Failed</h2>\n<ul>{items}</ul>\n')
+
+    body = (
+        f'<h1>{html_escape(title)}</h1>\n'
+        f'<p class="meta">Versions: {len(versions)} • New this run: {html_escape(str(new_count))} • Last updated: {html_escape(str(last_updated))}</p>\n'
+        + table_html
+        + ''.join(extras)
+    )
+
+    return head + body + '</body>\n</html>\n'
+
+
 tools = [
     {
         "name": "get_zoho_emails",
@@ -701,10 +796,33 @@ async def analyze_contracts_cmd(update: Update, context: ContextTypes.DEFAULT_TY
         if err:
             await update.message.reply_text(err)
             return
-        text = format_contract_comparison(
-            result["record"], result["new_count"], result["skipped"], result["failed"]
+        record = result["record"]
+        new_count = result["new_count"]
+        skipped = result["skipped"]
+        failed = result["failed"]
+        versions = record.get("versions") or []
+        if not versions:
+            await update.message.reply_text(
+                format_contract_comparison(record, new_count, skipped, failed)
+            )
+            return
+        html_doc = build_contract_html(record, new_count, skipped, failed)
+        version_n = record.get("current_version", len(versions))
+        filename = f"{_slug(company)}_{_slug(topic)}_v{version_n}.html"
+        caption = (
+            f"{company} — {topic}\n"
+            f"Versions: {len(versions)} • New this run: {new_count}"
         )
-        await update.message.reply_text(text)
+        if skipped:
+            caption += f"\nSkipped: {', '.join(skipped[:3])}"
+        if failed:
+            caption += f"\nFailed: {', '.join(failed[:3])}"
+        buf = io.BytesIO(html_doc.encode("utf-8"))
+        await update.message.reply_document(
+            document=buf,
+            filename=filename,
+            caption=caption[:1024],
+        )
     except Exception as e:
         logger.exception("analyze_contracts_cmd failed")
         await update.message.reply_text(f"Error: {str(e)[:200]}")
